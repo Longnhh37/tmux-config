@@ -1,4 +1,4 @@
-# tmuxd
+# tmux config + tmuxd – tmux status bar collector 
 
 `tmuxd` is a high-performance, asynchronous background daemon written in Rust, specifically optimized to serve status bar data for `tmux` on macOS (M-series). Instead of constantly spawning shell processes (shell-outs) which cause UI lag and high CPU usage, `tmuxd` runs quietly in the background, aggregates system context globally, and responds to tmux pane queries in `<5ms`.
 
