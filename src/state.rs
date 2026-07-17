@@ -32,7 +32,7 @@ pub struct GlobalState {
     /// OrbStack VM/runtime
     pub orbstack_running: bool,
 
-    /// % RAM usage
+    /// % RAM usage (0.0 if not ready)
     pub ram_percent: f32,
 
 }

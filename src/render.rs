@@ -179,8 +179,14 @@ pub async fn build(state: &SharedState, pane: &PerPaneContext) -> String {
 
 /// Replace $HOME with ~, then keep only the last 3 path components.
 fn shorten_path(path: &str) -> String {
-    let home = crate::utils::home_dir();
+    shorten_path_with_home(path, crate::utils::home_dir())
+}
 
+/// Pure core of `shorten_path`, taking `home` as a parameter instead of
+/// reading `crate::utils::home_dir()` directly, so it can be unit tested
+/// without depending on (or fighting) that function's process-wide
+/// `OnceLock` cache of the real `$HOME` env var.
+fn shorten_path_with_home(path: &str, home: &str) -> String {
     let display = if !home.is_empty() && path.starts_with(home) {
         format!("~{}", &path[home.len()..])
     } else {
@@ -190,4 +196,58 @@ fn shorten_path(path: &str) -> String {
     let parts: Vec<&str> = display.split('/').collect();
     let n = parts.len();
     parts[n.saturating_sub(3)..].join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shorten_path_replaces_home_with_tilde() {
+        assert_eq!(
+            shorten_path_with_home("/Users/dev/projects/tmuxd", "/Users/dev"),
+            "~/projects/tmuxd"
+        );
+    }
+
+    #[test]
+    fn shorten_path_keeps_only_last_three_components() {
+        assert_eq!(
+            shorten_path_with_home("/a/b/c/d/e/f", "/nonexistent"),
+            "d/e/f"
+        );
+    }
+
+    #[test]
+    fn shorten_path_leaves_short_paths_untouched() {
+        assert_eq!(shorten_path_with_home("/a/b", "/nonexistent"), "/a/b");
+    }
+
+    #[test]
+    fn shorten_path_ignores_home_if_path_does_not_start_with_it() {
+        // Path that merely *contains* the home string mid-way shouldn't be
+        // tilde-replaced — it just falls through to the normal
+        // last-3-components truncation like any other non-matching path.
+        assert_eq!(
+            shorten_path_with_home("/opt/Users/dev/x", "/Users/dev"),
+            "Users/dev/x"
+        );
+    }
+
+    #[test]
+    fn brew_icon_known_services_get_specific_icons() {
+        assert_eq!(brew_icon("nginx"), ICON_HTTP);
+        assert_eq!(brew_icon("kafka"), "󰿟");
+    }
+
+    #[test]
+    fn brew_icon_versioned_service_name_matches_base() {
+        // "vault@1.15" should resolve the same as "vault".
+        assert_eq!(brew_icon("vault@1.15"), brew_icon("vault"));
+    }
+
+    #[test]
+    fn brew_icon_unknown_service_falls_back_to_generic_icon() {
+        assert_eq!(brew_icon("some-random-service"), ICON_BREW);
+    }
 }

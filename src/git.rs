@@ -1,3 +1,4 @@
+// git.rs — per-pane, stale-while-revalidate cache keyed by path.
 use git2::{Repository, StatusOptions};
 use std::{
     collections::HashMap,
@@ -9,7 +10,9 @@ use tokio::sync::Mutex;
 const CACHE_TTL: Duration = Duration::from_secs(3);
 const COLD_START_TIMEOUT: Duration = Duration::from_millis(150);
 
-const EVICT_AFTER: Duration = Duration::from_secs(300);
+/// Paths không được access trong thời gian này sẽ bị evict khỏi cache.
+/// Tránh HashMap lớn dần khi daemon chạy nhiều ngày với nhiều paths.
+const EVICT_AFTER: Duration = Duration::from_secs(300); // 5 phút
 
 #[derive(Clone)]
 pub struct GitInfo {
@@ -41,6 +44,7 @@ pub async fn get_cached(path: &str) -> Option<GitInfo> {
     let (cached_val, needs_refresh) = {
         let mut guard = cache.lock().await;
 
+        // Evict paths không còn dùng (amortized — chạy mỗi lần acquire lock)
         guard.retain(|_, e| e.last_accessed.elapsed() < EVICT_AFTER);
 
         match guard.get_mut(path) {
@@ -62,6 +66,7 @@ pub async fn get_cached(path: &str) -> Option<GitInfo> {
                     let fresh = fetch_git_info(&path_owned).await;
                     let mut guard = cache2.lock().await;
                     if let Some(entry) = guard.get_mut(&path_owned) {
+                        // Chỉ update nếu entry vẫn còn (chưa bị evict)
                         entry.info = fresh;
                         entry.fetched = Instant::now();
                     }
@@ -70,6 +75,7 @@ pub async fn get_cached(path: &str) -> Option<GitInfo> {
             val
         }
         None => {
+            // Cold start với timeout để không block tmux render
             let info = tokio::time::timeout(COLD_START_TIMEOUT, fetch_git_info(path))
                 .await
                 .unwrap_or(None);
@@ -91,6 +97,7 @@ pub async fn get_cached(path: &str) -> Option<GitInfo> {
 async fn fetch_git_info(path: &str) -> Option<GitInfo> {
     let path_owned = path.to_string();
 
+    // Đưa git2 (đồng bộ) vào threadpool riêng để không block async runtime
     tokio::task::spawn_blocking(move || {
         let repo = Repository::discover(&path_owned).ok()?;
         let head = repo.head().ok()?;
@@ -99,6 +106,7 @@ async fn fetch_git_info(path: &str) -> Option<GitInfo> {
         let workdir = repo.workdir()?;
         let repo_name = workdir.file_name()?.to_string_lossy().into_owned();
 
+        // Tính toán status (changed files)
         let mut opts = StatusOptions::new();
         opts.include_untracked(false);
         let statuses = repo.statuses(Some(&mut opts)).ok()?;
@@ -115,6 +123,7 @@ async fn fetch_git_info(path: &str) -> Option<GitInfo> {
             }
         }
 
+        // Tính Insertions/Deletions chính xác tương tự như diff --shortstat
         let mut insertions = 0;
         let mut deletions = 0;
         if let Ok(tree) = head.peel_to_tree() {

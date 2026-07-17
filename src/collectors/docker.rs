@@ -1,7 +1,7 @@
+// collectors/docker.rs
 use crate::state::SharedState;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
@@ -9,12 +9,14 @@ pub async fn run(state: SharedState) {
     let mut cached_host: Option<String> = None;
 
     loop {
+        // Nếu có cached host, quick-check socket còn sống không
+        // thay vì probe toàn bộ candidates từ đầu
         let host = if let Some(ref h) = cached_host {
             let path = h.trim_start_matches("unix://");
             if tokio::fs::metadata(path).await.is_ok() {
-                Some(h.clone())
+                Some(h.clone()) // socket còn → dùng luôn
             } else {
-                resolve_docker_host().await
+                resolve_docker_host().await // socket mất → probe lại
             }
         } else {
             resolve_docker_host().await
@@ -22,11 +24,13 @@ pub async fn run(state: SharedState) {
 
         match host {
             Some(h) => {
-                cached_host = Some(h.clone());
+                cached_host = Some(h.clone()); // giữ cho vòng tiếp theo
 
                 state.write().await.docker_count = count_containers(&h).await;
                 stream_events(&h, state.clone()).await;
 
+                // Stream kết thúc — KHÔNG reset cached_host
+                // Vòng tiếp theo sẽ quick-check socket thay vì probe lại toàn bộ
                 tokio::time::sleep(RETRY_DELAY).await;
             }
             None => {
@@ -41,72 +45,58 @@ pub async fn run(state: SharedState) {
 }
 
 async fn stream_events(host: &str, state: SharedState) {
-    let path = host.trim_start_matches("unix://");
-
-    let mut stream = match UnixStream::connect(path).await {
-        Ok(s) => s,
+    let mut child = match docker_cmd(host)
+        .args([
+            "events",
+            "--filter",
+            "type=container",
+            "--filter",
+            "event=start",
+            "--filter",
+            "event=die",
+            "--filter",
+            "event=stop",
+            "--filter",
+            "event=pause",
+            "--filter",
+            "event=unpause",
+            "--format",
+            "{{.Status}}",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(_) => return,
     };
 
-    let req = "GET /events?filters=%7B%22type%22%3A%7B%22container%22%3Atrue%7D%2C%22event%22%3A%7B%22start%22%3Atrue%2C%22die%22%3Atrue%2C%22stop%22%3Atrue%2C%22pause%22%3Atrue%2C%22unpause%22%3Atrue%7D%7D HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    if stream.write_all(req.as_bytes()).await.is_err() {
-        return;
+    let stdout = child.stdout.take().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+
+    while let Ok(Some(_event)) = lines.next_line().await {
+        // Bất kỳ event nào → recount ngay lập tức
+        let count = count_containers(host).await;
+        state.write().await.docker_count = count;
     }
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-
-    // Bỏ qua các HTTP headers
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-            return;
-        }
-        if line == "\r\n" {
-            break;
-        }
-    }
-
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-            break;
-        }
-
-        let trimmed = line.trim();
-        if trimmed.starts_with('{') {
-            let count = count_containers(host).await;
-            state.write().await.docker_count = count;
-        }
-    }
+    // Stream kết thúc → caller giữ count cũ, retry sau RETRY_DELAY
 }
 
 async fn count_containers(host: &str) -> u32 {
-    let path = host.trim_start_matches("unix://");
-    let mut stream = match UnixStream::connect(path).await {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
+    let out = docker_cmd(host)
+        .args(["ps", "-q"])
+        .output()
+        .await
+        .unwrap_or_else(|_| std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: vec![],
+            stderr: vec![],
+        });
 
-    let req = "GET /containers/json HTTP/1.0\r\nHost: localhost\r\n\r\n";
-    if stream.write_all(req.as_bytes()).await.is_err() {
-        return 0;
-    }
-
-    let mut resp = String::new();
-    if stream.read_to_string(&mut resp).await.is_err() {
-        return 0;
-    }
-
-    if let Some(body_start) = resp.find("\r\n\r\n") {
-        let body = &resp[body_start + 4..];
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-            if let Some(arr) = json.as_array() {
-                return arr.len() as u32;
-            }
-        }
-    }
-    0
+    std::str::from_utf8(&out.stdout)
+        .unwrap_or("")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count() as u32
 }
 
 async fn resolve_docker_host() -> Option<String> {
@@ -124,4 +114,11 @@ async fn resolve_docker_host() -> Option<String> {
         }
     }
     None
+}
+
+fn docker_cmd(host: &str) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new("docker");
+    c.env("PATH", crate::utils::full_path());
+    c.env("DOCKER_HOST", host);
+    c
 }

@@ -18,6 +18,8 @@ use crate::state::SharedState;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 
+// Brew services đã được hiện thông qua port detection → bỏ qua để tránh duplicate
+// VD: redis đã hiện icon  khi port 6379 active
 const PORT_COVERED: &[&str] = &[
     "redis",
     "postgresql",
@@ -30,6 +32,7 @@ const PORT_COVERED: &[&str] = &[
 
 pub async fn run(state: SharedState) {
     loop {
+        // Chạy song song cả 3 checks
         let (orbstack, k8s, brew) =
             tokio::join!(check_orbstack(), check_kubernetes(), check_brew_services(),);
 
@@ -64,6 +67,7 @@ async fn check_orbstack() -> bool {
         }
     }
 
+    // Fallback: probe OrbStack local API port 3847
     let tcp = tokio::time::timeout(
         Duration::from_millis(300),
         TcpStream::connect("127.0.0.1:3847"),
@@ -126,6 +130,7 @@ async fn check_kubernetes() -> Option<String> {
     let home = crate::utils::home_dir();
     let kube_path = format!("{home}/.kube/config");
 
+    // Đọc thẳng file config (siêu nhanh, không cần spawn process)
     let yaml = tokio::fs::read_to_string(&kube_path).await.ok()?;
     let config: KubeConfig = serde_yaml::from_str(&yaml).ok()?;
 
@@ -145,6 +150,7 @@ async fn check_kubernetes() -> Option<String> {
         .trim_start_matches("https://")
         .trim_start_matches("http://");
 
+    // TCP probe (giữ nguyên logic check cluster có sống không)
     let reachable =
         tokio::time::timeout(Duration::from_millis(400), TcpStream::connect(addr)).await;
 
@@ -154,17 +160,23 @@ async fn check_kubernetes() -> Option<String> {
     }
 }
 
+/// Rút gọn context name cho bar:
+///   "gke_my-project_us-central1_dev"  → "gke/dev"
+///   "arn:aws:eks:...:cluster/prod"    → "eks/prod"
 fn shorten_context(ctx: &str) -> String {
+    // GKE: gke_<project>_<region>_<name>
     if ctx.starts_with("gke_") {
         if let Some(name) = ctx.split('_').next_back() {
             return format!("gke/{name}");
         }
     }
+    // EKS ARN: arn:aws:eks:region:account:cluster/name
     if ctx.contains(":cluster/") {
         if let Some(name) = ctx.split('/').next_back() {
             return format!("eks/{name}");
         }
     }
+    // Mặc định: giữ nguyên, truncate 14 ký tự
     ctx.chars().take(14).collect()
 }
 

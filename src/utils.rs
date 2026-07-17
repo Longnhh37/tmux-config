@@ -1,5 +1,23 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// Base directory for the daemon socket and per-pane cache files.
+///
+/// Uses `std::env::temp_dir()` instead of a hardcoded `/tmp`: on macOS this
+/// resolves to the per-user `$TMPDIR` (e.g. `/var/folders/xx/.../T/`), which
+/// isn't a world-writable shared directory the way `/tmp` is.
+pub fn runtime_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(std::env::temp_dir)
+}
+
+pub fn sock_path() -> PathBuf {
+    runtime_dir().join("tmuxd.sock")
+}
+
+pub fn cache_path(pane_id: &str) -> PathBuf {
+    runtime_dir().join(format!("tmux_status_{pane_id}"))
+}
 
 pub fn home_dir() -> &'static str {
     static HOME: OnceLock<String> = OnceLock::new();
@@ -18,12 +36,4 @@ pub fn full_path() -> &'static str {
             format!("{extra}:{existing}")
         }
     })
-}
-
-pub fn sock_path() -> PathBuf {
-    std::env::temp_dir().join("tmuxd.sock")
-}
-
-pub fn cache_path(pane_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("tmux_status_{pane_id}"))
 }

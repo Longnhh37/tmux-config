@@ -1,67 +1,127 @@
-# tmux config + tmuxd – tmux status bar collector 
+# tmux config + tmuxd -- tmux status bar collector
 
-`tmuxd` is a high-performance, asynchronous background daemon written in Rust, specifically optimized to serve status bar data for `tmux` on macOS (M-series). Instead of constantly spawning shell processes (shell-outs) which cause UI lag and high CPU usage, `tmuxd` runs quietly in the background, aggregates system context globally, and responds to tmux pane queries in `<5ms`.
+## What it is
 
-## Architecture & Flow
+`tmuxd` is a daemon that renders a rich tmux status bar.
 
-The system is designed around a decoupled architecture separating heavy, slow global metrics from fast, path-specific contextual data.
+Instead of executing expensive commands (`git status`, `docker`,
+`kubectl`, `brew`, ...) every time tmux redraws the status line, a
+background daemon continuously collects machine state and keeps it in
+memory.
 
-```text
-                              ┌─────────────────────────────────────────┐
-                              │           tmuxd daemon                  │
-                              │                                         │
-┌────────────┐                │  ┌───────────────────────────────────┐  │
-│            │                │  │ Background Collectors (Async)     │  │
-│ tmux (UI)  │                │  │  ├─ Docker (Unix Socket HTTP)     │  │
-│            │                │  │  ├─ Ollama (reqwest HTTP)         │  │
-└─────┬──────┘                │  │  ├─ K8s, Brew, OrbStack Services  │  │
-      │                       │  │  ├─ Active TCP Ports              │  │
-      │ 1. query              │  │  └─ RAM Pressure                  │  │
-      │    pane_id            │  └─────────────────┬─────────────────┘  │
-      │    pane_path          │                    │ 3. continuously    │
-      ▼                       │                    │    updates         │
-┌────────────┐                │                    ▼                    │
-│            │ 2. connects    │  ┌───────────────────────────────────┐  │
-│ tmuxd      ├─ Unix Socket ─►│  │ Global State (In-Memory RwLock)   │  │
-│ status     │  ($TMPDIR)     │  └─────────────────┬─────────────────┘  │
-│            ◄─ 6. returns  ─ ┤                    │ 4. reads           │
-└────────────┘    string      │                    ▼                    │
-                              │  ┌───────────────────────────────────┐  │
-                              │  │ Render Engine (Nerd Fonts)        │  │
-                              │  └─────────────────▲─────────────────┘  │
-                              │                    │ 5. reads           │
-                              │  ┌─────────────────┴─────────────────┐  │
-                              │  │ Per-Pane Context                  │  │
-                              │  │  └─ Git (stale-while-revalidate)  │  │
-                              │  └───────────────────────────────────┘  │
-                              └─────────────────────────────────────────┘
+When tmux needs to redraw the status bar, it only performs a lightweight
+Unix socket request that typically completes in a few milliseconds.
+
+------------------------------------------------------------------------
+
+# Why?
+
+A typical tmux status bar might execute commands such as
+
+-   `git status`
+-   `docker ps`
+-   `kubectl config current-context`
+-   `brew services list`
+
+every second.
+
+That means:
+
+-   every pane repeats the same work
+-   slow CLIs are spawned over and over
+-   large Git repositories become noticeably laggy
+
+`tmuxd` moves all expensive work into one background daemon.
+
+Machine-wide information (Docker, RAM, Kubernetes, services, Ollama...)
+is collected once and shared by every pane.
+
+Only Git remains pane-specific.
+
+------------------------------------------------------------------------
+
+# Request Flow
+
+``` text
+┌────────────┐
+│ tmux (UI)  │
+└─────┬──────┘
+      │
+      │ status-right
+      │ tmuxd status <pane_id> <pane_path>
+      ▼
+┌────────────────────┐
+│ client.rs          │
+│ (short-lived)      │
+└─────────┬──────────┘
+          │
+          │ Unix socket
+          ▼
+┌────────────────────┐
+│ server.rs          │
+└─────────┬──────────┘
+          │
+          ├── read GlobalState
+          ├── git.rs (per-path cache)
+          ├── render.rs
+          ▼
+   rendered status string
+          │
+          ▼
+       tmux status bar
+
+If the daemon is unavailable:
+
+client.rs
+      │
+      ▼
+last-known cache
 ```
 
-### Core Workflows
+# Daemon Architecture
 
-The application is split into two independent lifecycles communicating via a Unix Socket:
+``` text
+                        ┌──────────────────────────────┐
+                        │         tmuxd daemon         │
+                        └──────────────┬───────────────┘
+                                       │
+                 ┌─────────────────────┴─────────────────────┐
+                 │                                           │
+                 ▼                                           ▼
+        Background collectors                    Unix socket server
+          (tokio tasks)                             (server.rs)
 
-1. **Background Collectors (`daemon`)**
-   - Runs continuously in the background utilizing the `tokio` async runtime.
-   - Responsible for tracking slow-to-fetch global metrics (Docker container counts, Kubernetes contexts, Brew services, Ollama models, open ports, and RAM pressure).
-   - **Zero-Shell-Out Optimization:** Modules like Docker and Ollama communicate directly via native HTTP (over Unix sockets or TCP), completely eliminating the overhead of spawning external CLI dependencies.
+ docker ───────────────┐
+ ollama ───────────────┤
+ ports ────────────────┤
+ ram ──────────────────┤
+ services ─────────────┘
+             │
+             ▼
+     Arc<RwLock<GlobalState>>
+             │
+             ▼
+       request handler
+             │
+             ├── git.rs
+             ├── render.rs
+             ▼
+       rendered status
+```
 
-2. **Client Query (`status`)**
-   - Invoked by tmux on status bar redraw: `tmuxd status <pane_id> <pane_path>`.
-   - Connects to the daemon via a secure, user-specific Unix socket in macOS (`$TMPDIR/tmuxd.sock`).
-   - The daemon immediately resolves `pane_path`-specific data (like Git branch and diffs via `libgit2` using a non-blocking stale-while-revalidate cache), merges it with the latest snapshot of the Global State, and returns a fully formatted Nerd Font string.
+# Collectors
 
-## Key Optimizations for macOS
+  Collector     Responsibility
+  ------------- -------------------------------------------------
+  docker.rs     running containers + docker events
+  ports.rs      listening development ports
+  ollama.rs     loaded Ollama model
+  services.rs   Kubernetes context, Homebrew services, OrbStack
+  ram.rs        RAM usage
 
-* **Native API Integrations:** Bypasses `docker` and `xh`/`curl` binaries by interacting directly with the Docker Engine API and Ollama API.
-* **Race-Condition Safety:** Improved socket binding logic preventing `EADDRINUSE` errors on restart.
-* **Graceful Shutdowns:** Listens to `SIGTERM` / `SIGINT` to cleanly remove socket files upon exit.
-* **Secure Cache & Sockets:** Utilizes macOS `$TMPDIR` instead of the globally shared `/tmp` directory for enhanced security and collision avoidance.
+# Requirements
 
-## Directory Structure
-
-* `client.rs` / `server.rs`: Handles the Unix Socket request/response protocol, signal handling, and fallback file caching.
-* `collectors/`: Modules that poll system metrics at specific intervals (Docker, Ollama, K8s, Ports, RAM).
-* `git.rs`: Per-pane Git repository state resolver using a TTL-based cache.
-* `render.rs`: The formatting engine that concatenates states into a Nerd Font icon string.
-* `state.rs`: Defines the shared `RwLock` data structures holding the global context.
+-   macOS
+-   Rust 2021
+-   tmux ≥ 2.1
+-   Nerd Font
