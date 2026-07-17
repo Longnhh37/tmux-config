@@ -1,11 +1,10 @@
+// Common filesystem utility handles locating sockets, paths, and environment constants.
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Base directory for the daemon socket and per-pane cache files.
-///
-/// Uses `std::env::temp_dir()` instead of a hardcoded `/tmp`: on macOS this
-/// resolves to the per-user `$TMPDIR` (e.g. `/var/folders/xx/.../T/`), which
-/// isn't a world-writable shared directory the way `/tmp` is.
+// ── Path Location Providers ──
+
 pub fn runtime_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(std::env::temp_dir)

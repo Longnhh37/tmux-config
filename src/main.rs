@@ -1,3 +1,5 @@
+// Binary orchestrator checking arguments and launching either the client query or background daemon.
+
 mod client;
 mod utils;
 mod collectors;
@@ -8,6 +10,8 @@ mod server;
 mod state;
 
 use anyhow::Result;
+
+// ── Main Guard Routing ──
 
 #[tokio::main]
 async fn main() -> Result<()> {

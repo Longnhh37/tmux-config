@@ -1,38 +1,21 @@
-// collectors/services.rs
-//
-// Detects manually-started services that ports.rs không cover được:
-//
-//   Kubernetes  → kubectl current-context + TCP probe API server
-//   Brew        → `brew services list --json`  (bỏ qua các service đã hiện qua port)
-//
-// Poll interval: 15 s (chậm hơn ports.rs vì các lệnh này tốn kém hơn)
+// Background collector inspecting Kubernetes clusters, Brew services, and OrbStack status.
 
 use std::collections::HashSet;
 use std::time::Duration;
-
 use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio::process::Command;
-
 use crate::state::SharedState;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
-
-// Brew services đã được hiện thông qua port detection → bỏ qua để tránh duplicate
-// VD: redis đã hiện icon  khi port 6379 active
 const PORT_COVERED: &[&str] = &[
-    "redis",
-    "postgresql",
-    "postgresql@14",
-    "postgresql@16",
-    "mysql",
-    "mysql@8.0",
-    "mongodb-community",
+    "redis", "postgresql", "postgresql@14", "postgresql@16", "mysql", "mysql@8.0", "mongodb-community",
 ];
+
+// ── Main Routing Loop ──
 
 pub async fn run(state: SharedState) {
     loop {
-        // Chạy song song cả 3 checks
         let (orbstack, k8s, brew) =
             tokio::join!(check_orbstack(), check_kubernetes(), check_brew_services(),);
 
@@ -47,16 +30,10 @@ pub async fn run(state: SharedState) {
     }
 }
 
-// ── OrbStack ────────────────────────────────────────────────────────────────
-//
-// Ưu tiên:
-//   1. docker.sock của OrbStack
-//   2. orbctl status
-//
+// ── OrbStack Checker ──
 
 async fn check_orbstack() -> bool {
     let home = crate::utils::home_dir();
-
     let candidates = [
         format!("{home}/.orbstack/run/docker.sock"),
         format!("{home}/Library/Containers/com.orbstack.mac/Data/docker.sock"),
@@ -67,7 +44,6 @@ async fn check_orbstack() -> bool {
         }
     }
 
-    // Fallback: probe OrbStack local API port 3847
     let tcp = tokio::time::timeout(
         Duration::from_millis(300),
         TcpStream::connect("127.0.0.1:3847"),
@@ -77,7 +53,6 @@ async fn check_orbstack() -> bool {
         return true;
     }
 
-    // Last resort: orbctl
     tokio::time::timeout(
         Duration::from_millis(500),
         Command::new("orbctl")
@@ -92,13 +67,7 @@ async fn check_orbstack() -> bool {
     .unwrap_or(false)
 }
 
-// ── Kubernetes ───────────────────────────────────────────────────────────────
-//
-// Bước 1: kubectl config current-context  → tên context (đọc file local, rất nhanh)
-// Bước 2: TCP probe API server             → xác nhận cluster đang thực sự chạy
-//
-// Không dùng `kubectl cluster-info` vì nó làm full TLS handshake có thể
-// mất vài giây nếu cluster không phản hồi.
+// ── Kubernetes Checker ──
 
 #[derive(Deserialize)]
 struct KubeConfig {
@@ -130,7 +99,6 @@ async fn check_kubernetes() -> Option<String> {
     let home = crate::utils::home_dir();
     let kube_path = format!("{home}/.kube/config");
 
-    // Đọc thẳng file config (siêu nhanh, không cần spawn process)
     let yaml = tokio::fs::read_to_string(&kube_path).await.ok()?;
     let config: KubeConfig = serde_yaml::from_str(&yaml).ok()?;
 
@@ -150,7 +118,6 @@ async fn check_kubernetes() -> Option<String> {
         .trim_start_matches("https://")
         .trim_start_matches("http://");
 
-    // TCP probe (giữ nguyên logic check cluster có sống không)
     let reachable =
         tokio::time::timeout(Duration::from_millis(400), TcpStream::connect(addr)).await;
 
@@ -160,27 +127,22 @@ async fn check_kubernetes() -> Option<String> {
     }
 }
 
-/// Rút gọn context name cho bar:
-///   "gke_my-project_us-central1_dev"  → "gke/dev"
-///   "arn:aws:eks:...:cluster/prod"    → "eks/prod"
 fn shorten_context(ctx: &str) -> String {
-    // GKE: gke_<project>_<region>_<name>
     if ctx.starts_with("gke_") {
         if let Some(name) = ctx.split('_').next_back() {
             return format!("gke/{name}");
         }
     }
-    // EKS ARN: arn:aws:eks:region:account:cluster/name
     if ctx.contains(":cluster/") {
         if let Some(name) = ctx.split('/').next_back() {
             return format!("eks/{name}");
         }
     }
-    // Mặc định: giữ nguyên, truncate 14 ký tự
     ctx.chars().take(14).collect()
 }
 
-// ── Brew services ────────────────────────────────────────────────────────────
+// ── Brew Services Checker ──
+
 #[derive(Deserialize)]
 struct BrewServiceEntry {
     name: String,
@@ -225,7 +187,7 @@ fn parse_brew_services_json(json: &str) -> HashSet<String> {
         .collect()
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Tests ──
 
 #[cfg(test)]
 mod tests {
@@ -239,15 +201,9 @@ mod tests {
             {"name":"postgresql@14","running":false,"loaded":false}
         ]"#;
         let services = parse_brew_services_json(json);
-        assert!(
-            !services.contains("redis"),
-            "redis should be skipped (port covered)"
-        );
-        assert!(services.contains("nginx"), "nginx should be included");
-        assert!(
-            !services.contains("postgresql@14"),
-            "postgresql@14 not running"
-        );
+        assert!(!services.contains("redis"));
+        assert!(services.contains("nginx"));
+        assert!(!services.contains("postgresql@14"));
     }
 
     #[test]

@@ -1,22 +1,23 @@
-// collectors/docker.rs
+// Background collector for tracking active Docker containers and filtering live events.
+
 use crate::state::SharedState;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
+// ── Main Loop ──
+
 pub async fn run(state: SharedState) {
     let mut cached_host: Option<String> = None;
 
     loop {
-        // Nếu có cached host, quick-check socket còn sống không
-        // thay vì probe toàn bộ candidates từ đầu
         let host = if let Some(ref h) = cached_host {
             let path = h.trim_start_matches("unix://");
             if tokio::fs::metadata(path).await.is_ok() {
-                Some(h.clone()) // socket còn → dùng luôn
+                Some(h.clone())
             } else {
-                resolve_docker_host().await // socket mất → probe lại
+                resolve_docker_host().await
             }
         } else {
             resolve_docker_host().await
@@ -24,13 +25,11 @@ pub async fn run(state: SharedState) {
 
         match host {
             Some(h) => {
-                cached_host = Some(h.clone()); // giữ cho vòng tiếp theo
+                cached_host = Some(h.clone());
 
                 state.write().await.docker_count = count_containers(&h).await;
                 stream_events(&h, state.clone()).await;
 
-                // Stream kết thúc — KHÔNG reset cached_host
-                // Vòng tiếp theo sẽ quick-check socket thay vì probe lại toàn bộ
                 tokio::time::sleep(RETRY_DELAY).await;
             }
             None => {
@@ -43,6 +42,8 @@ pub async fn run(state: SharedState) {
         }
     }
 }
+
+// ── Helper Functions ──
 
 async fn stream_events(host: &str, state: SharedState) {
     let mut child = match docker_cmd(host)
@@ -74,11 +75,9 @@ async fn stream_events(host: &str, state: SharedState) {
     let mut lines = BufReader::new(stdout).lines();
 
     while let Ok(Some(_event)) = lines.next_line().await {
-        // Bất kỳ event nào → recount ngay lập tức
         let count = count_containers(host).await;
         state.write().await.docker_count = count;
     }
-    // Stream kết thúc → caller giữ count cũ, retry sau RETRY_DELAY
 }
 
 async fn count_containers(host: &str) -> u32 {

@@ -1,9 +1,4 @@
-// collectors/ports.rs
-//
-// Clear logic:
-//   - lsof trả Err (IO error / crash) → GIỮ ports cũ
-//   - lsof trả Ok(empty) 1 lần → GIỮ ports cũ (race condition khi port đang bind)
-//   - lsof trả Ok(empty) 2 lần liên tiếp → clear (port thực sự đã đóng)
+// Background collector identifying local dev and database listening ports.
 
 use crate::state::SharedState;
 use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags};
@@ -11,22 +6,12 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 const PORTS_OF_INTEREST: &[u16] = &[
-    5432,  // postgres
-    6379,  // redis
-    3306,  // mysql
-    27017, // mongodb
-    3001,  // node dev
-    5001,  // python
-    5173,  // vite
-    8000,  // python / django
-    8080,  // generic http
-    8888,  // jupyter
+    5432, 6379, 3306, 27017, 3001, 5001, 5173, 8000, 8080, 8888,
 ];
-
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Số lần liên tiếp lsof trả empty trước khi clear listening_ports.
 const EMPTY_THRESHOLD: u32 = 2;
+
+// ── Main Loop ──
 
 pub async fn run(state: SharedState) {
     let port_filter: String = PORTS_OF_INTEREST
@@ -39,12 +24,9 @@ pub async fn run(state: SharedState) {
 
     loop {
         match poll_ports(&port_filter).await {
-            Err(_) => {
-                // lsof fail (IO error) → GIỮ nguyên, không reset
-            }
+            Err(_) => {}
             Ok(ports) if ports.is_empty() => {
                 consecutive_empty += 1;
-                // Chỉ clear sau N lần liên tiếp
                 if should_clear(consecutive_empty) {
                     let mut s = state.write().await;
                     if !s.listening_ports.is_empty() {
@@ -62,16 +44,11 @@ pub async fn run(state: SharedState) {
     }
 }
 
-/// True once `lsof`/netstat has come back empty `EMPTY_THRESHOLD` times in a
-/// row — i.e. we're confident the port is actually closed rather than
-/// mid-bind. Pulled out of the polling loop so the hysteresis rule itself is
-/// unit-testable without mocking `netstat2`.
 fn should_clear(consecutive_empty: u32) -> bool {
     consecutive_empty >= EMPTY_THRESHOLD
 }
 
 async fn poll_ports(_port_filter: &str) -> anyhow::Result<HashSet<u16>> {
-    // Chạy trong spawn_blocking vì đây là OS syscalls có thể block nhẹ
     let ports = tokio::task::spawn_blocking(|| {
         let mut active_ports = HashSet::new();
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
@@ -90,10 +67,11 @@ async fn poll_ports(_port_filter: &str) -> anyhow::Result<HashSet<u16>> {
     })
     .await?;
 
-    // Chỉ giữ lại những port ta quan tâm
     let interest: HashSet<u16> = PORTS_OF_INTEREST.iter().copied().collect();
     Ok(ports.intersection(&interest).copied().collect())
 }
+
+// ── Tests ──
 
 #[cfg(test)]
 mod tests {
