@@ -70,6 +70,8 @@ Only Git remains pane-specific.
           ▼
        tmux status bar
 
+
+
 If the daemon is unavailable:
 
 client.rs
@@ -90,12 +92,13 @@ last-known cache
                  ▼                                           ▼
         Background collectors                    Unix socket server
           (tokio tasks)                             (server.rs)
-
- docker ───────────────┐
- ollama ───────────────┤
- ports ────────────────┤
- ram ──────────────────┤
- services ─────────────┘
+                  |
+                  ▼
+ docker ──────────┐
+ ollama ──────────┤
+ ports────────────┤
+ ram ─────────────┤
+ services ────────┘
              │
              ▼
      Arc<RwLock<GlobalState>>
@@ -111,13 +114,13 @@ last-known cache
 
 # Collectors
 
-  Collector     Responsibility
-  ------------- -------------------------------------------------
-  docker.rs     running containers + docker events
-  ports.rs      listening development ports
-  ollama.rs     loaded Ollama model
-  services.rs   Kubernetes context, Homebrew services, OrbStack
-  ram.rs        RAM usage
+      Collector              Responsibility
+      -------------          -------------------------------------------------
+      docker.rs              running containers + docker events
+      ports.rs               listening development ports
+      ollama.rs              loaded Ollama model
+      services.rs            Kubernetes context, Homebrew services, OrbStack
+      ram.rs                 RAM usage
 
 # Requirements
 
