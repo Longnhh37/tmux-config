@@ -51,13 +51,16 @@ fn brew_icon(name: &str) -> &'static str {
 
 pub async fn build(state: &SharedState, pane: &PerPaneContext) -> String {
     let s = state.read().await;
-    let mut parts: Vec<String> = Vec::with_capacity(8);
+    let mut parts: Vec<String> = Vec::new();
 
     if let Some(g) = &pane.git {
         let mut entry = format!("{ICON_BRANCH} {}:{}", g.repo, g.branch);
         if g.changed > 0 {
             entry.push_str(&format!(" ~{}", g.changed));
         }
+   	if g.untracked > 0 {
+        	entry.push_str(&format!(" ?{}", g.untracked));
+    	}
         if g.insertions > 0 {
             entry.push_str(&format!(" +{}", g.insertions));
         }
@@ -90,10 +93,10 @@ pub async fn build(state: &SharedState, pane: &PerPaneContext) -> String {
     }
 
     let mut dev: Vec<&str> = Vec::new();
-    for &port in &[3001u16, 5001, 5173, 8000, 8080, 8888] {
+    for &port in &[3000u16, 3001, 5001, 5173, 8000, 8080, 8888] {
         if !s.listening_ports.contains(&port) { continue; }
         dev.push(match port {
-            3001 => ICON_NODE,
+            3000 | 3001 => ICON_NODE,
             5173 => ICON_VITE,
             5001 | 8000 => ICON_PYTHON,
             8080 => ICON_HTTP,

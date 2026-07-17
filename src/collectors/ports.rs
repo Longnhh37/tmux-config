@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 const PORTS_OF_INTEREST: &[u16] = &[
-    5432, 6379, 3306, 27017, 3001, 5001, 5173, 8000, 8080, 8888,
+    5432, 6379, 3306, 27017, 3000, 3001, 5001, 5173, 8000, 8080, 8888,
 ];
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const EMPTY_THRESHOLD: u32 = 2;
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn ports_of_interest_covers_expected_databases_and_dev_servers() {
-        for p in [5432u16, 6379, 3306, 27017, 3001, 5001, 5173, 8000, 8080, 8888] {
+        for p in [5432u16, 6379, 3000, 3306, 27017, 3001, 5001, 5173, 8000, 8080, 8888] {
             assert!(
                 PORTS_OF_INTEREST.contains(&p),
                 "expected {p} to be in PORTS_OF_INTEREST"
